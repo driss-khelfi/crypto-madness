@@ -7,15 +7,44 @@
 #include <queue>
 #include <thread>
 
+#include <fstream>
+#include <map>
+
 #include "../include/LPTF_Net/LPTF_Socket.hpp"
 #include "../include/LPTF_Net/LPTF_Utils.hpp"
 
+// #include <sodium.h>
+
+#include "../include/crypto.hpp"
+
 using namespace std;
+
+
+#define PASSWORD_FILE "actually_safe_this_time.txt"
+
 
 struct client {
     int sockfd;
     string username;
 };
+
+
+// FIXME implement
+bool is_password_valid(string &password) {
+    if (password.size() > 0) {
+
+        
+        return true;
+    }
+    
+    return false;
+}
+
+
+// based on Proton's description
+float calculate_password_entropy(string &password) {
+    return 0.0;
+}
 
 
 void close_client_connection(int clientSockfd, vector<struct client> &clients, mutex &clients_mutex);
@@ -25,6 +54,8 @@ void send_message(LPTF_Socket *serverSocket, int clientSockfd, string userfrom, 
 void broadcast_message(LPTF_Socket *serverSocket, int clientSockfd, string userfrom, string message, time_t t, vector<struct client> &clients, mutex &clients_mutex);
 void listen_for_client(LPTF_Socket *serverSocket, int clientSockfd, sockaddr_in clientAddr, socklen_t clientAddrLen, vector<struct client> &clients, mutex &clients_mutex);
 void set_client_username(int clientSockfd, string username, vector<struct client> &clients, mutex &clients_mutex);
+std::map<std::string, std::string> read_passwords();
+void write_password(const std::string &username, const std::string &hashed_password);
 
 
 // borrowed from https://www.geeksforgeeks.org/thread-pool-in-cpp/
@@ -108,6 +139,107 @@ private:
 };
 
 
+string wait_for_login(LPTF_Socket *serverSocket, int clientSockfd, vector<struct client> &clients, mutex &clients_mutex) {
+    std::map<std::string, std::string> passwords = read_passwords();
+
+    LPTF_Packet pckt = serverSocket->recv(clientSockfd, 0);
+
+    if (pckt.type() == LOGIN_PACKET) {
+        string client_username ((const char *)pckt.get_content(), pckt.get_header().length);
+
+        if (client_username.size() == 0) {
+            string err_msg = "Username invalid !";
+            LPTF_Packet error_packet = build_error_packet(LOGIN_PACKET, ERR_CODE_FAILURE, err_msg);
+            serverSocket->send(clientSockfd, error_packet, 0);
+            return string();
+        } else {
+            if (passwords.find(client_username) != passwords.end()) {
+                // User exists, ask for password
+                string reply_msg = "Enter Password: ";
+                LPTF_Packet ask_password_packet = build_reply_packet(LOGIN_PACKET, (void*)reply_msg.c_str(), reply_msg.size());
+                serverSocket->send(clientSockfd, ask_password_packet, 0);
+
+                LPTF_Packet password_packet = serverSocket->recv(clientSockfd, 0);
+                string password ((const char *)password_packet.get_content(), password_packet.get_header().length);
+
+                string hash = md5(password);
+
+                if (hash == passwords[client_username]) {
+                    
+                    if (is_user_logged_in(client_username, clients, clients_mutex)) {
+                        string err_msg = "User already logged in !";
+                        LPTF_Packet error_packet = build_error_packet(LOGIN_PACKET, ERR_CODE_FAILURE, err_msg);
+                        serverSocket->send(clientSockfd, error_packet, 0);
+                        return string();
+                    }
+
+                    LPTF_Packet success_packet = build_reply_packet(LOGIN_PACKET, (void*)"OK", 2);
+                    serverSocket->send(clientSockfd, success_packet, 0);
+                    return client_username;
+                } else {
+                    string err_msg = "Wrong Password.";
+                    LPTF_Packet error_packet = build_error_packet(LOGIN_PACKET, ERR_CODE_UNKNOWN, err_msg);
+                    serverSocket->send(clientSockfd, error_packet, 0);
+                }
+            } else {
+                // User doesn't exist, ask for new password
+                LPTF_Packet ask_password_packet = build_message_packet("Create a new Password: ");
+                serverSocket->send(clientSockfd, ask_password_packet, 0);
+
+                LPTF_Packet password_packet = serverSocket->recv(clientSockfd, 0);
+                LPTF_Packet password_confirm_packet = serverSocket->recv(clientSockfd, 0);
+                std::string password((const char *)password_packet.get_content(), password_packet.get_header().length);
+                string password_confirm ((const char *)password_confirm_packet.get_content(), password_confirm_packet.get_header().length);
+
+                if (password == password_confirm) {
+
+                    if (!is_password_valid(password)) {
+                        string err_msg = "Password format invalid !";
+                        LPTF_Packet error_packet = build_error_packet(LOGIN_PACKET, ERR_CODE_FAILURE, err_msg);
+                        serverSocket->send(clientSockfd, error_packet, 0);
+                        return string();
+                    }
+                    
+                    if (is_user_logged_in(client_username, clients, clients_mutex)) {
+                        string err_msg = "User already logged in !";
+                        LPTF_Packet error_packet = build_error_packet(LOGIN_PACKET, ERR_CODE_FAILURE, err_msg);
+                        serverSocket->send(clientSockfd, error_packet, 0);
+                        return string();
+                    }
+
+                    write_password(client_username, md5(password));
+                    LPTF_Packet success_packet = build_reply_packet(LOGIN_PACKET, (void*)"OK", 2);
+                    serverSocket->send(clientSockfd, success_packet, 0);
+                    return client_username;
+                } else {
+                    string err_msg = "Password and Confirmation are different !";
+                    LPTF_Packet error_packet = build_error_packet(LOGIN_PACKET, ERR_CODE_UNKNOWN, err_msg);
+                    serverSocket->send(clientSockfd, error_packet, 0);
+                }
+            }
+        }
+    } else {
+        string err_msg = "You must log in to perform this action.";
+        LPTF_Packet error_packet = build_error_packet(pckt.type(), ERR_CODE_UNKNOWN, err_msg);
+        serverSocket->send(clientSockfd, error_packet, 0);
+    }
+
+    return string();
+}
+
+
+bool is_user_logged_in(string username, vector<struct client> &clients, mutex &clients_mutex) {
+    lock_guard<mutex> lock(clients_mutex);
+    
+    for (auto client : clients) {
+        if (client.username.compare(username) == 0)
+            return true;
+    }
+
+    return false;
+}
+
+
 void close_client_connection(int clientSockfd, vector<struct client> &clients, mutex &clients_mutex) {
     cout << "Closing client connection" << endl;
 
@@ -135,47 +267,27 @@ void set_client_username(int clientSockfd, string username, vector<struct client
 }
 
 
-string wait_for_login(LPTF_Socket *serverSocket, int clientSockfd, vector<struct client> &clients, mutex &clients_mutex) {
-    LPTF_Packet pckt = serverSocket->recv(clientSockfd, 0);
-
-    if (pckt.type() == LOGIN_PACKET) {
-        string client_username ((const char *)pckt.get_content(), pckt.get_header().length);
-
-        if (client_username.size() == 0) {
-            string err_msg = "Username invalid !";
-            LPTF_Packet error_packet = build_error_packet(LOGIN_PACKET, ERR_CMD_FAILURE, err_msg);
-            serverSocket->send(clientSockfd, error_packet, 0);
-            return string();
-        } else if (is_user_logged_in(client_username, clients, clients_mutex)) {
-            string err_msg = "User already logged in !";
-            LPTF_Packet error_packet = build_error_packet(LOGIN_PACKET, ERR_CMD_FAILURE, err_msg);
-            serverSocket->send(clientSockfd, error_packet, 0);
-            return string();
-        } else {
-            LPTF_Packet success_packet = build_reply_packet(LOGIN_PACKET, (void*)"OK", 2);
-            serverSocket->send(clientSockfd, success_packet, 0);
-            return client_username;
+std::map<std::string, std::string> read_passwords() {
+    std::ifstream file(PASSWORD_FILE);
+    std::map<std::string, std::string> passwords;
+    std::string line;
+    
+    while (std::getline(file, line)) {
+        size_t sep = line.find(':');
+        if (sep != std::string::npos) {
+            std::string username = line.substr(0, sep);
+            std::string password = line.substr(sep + 1);
+            passwords[username] = password;
         }
-
-    } else {
-        string err_msg = "You must log in to perform this action.";
-        LPTF_Packet error_packet = build_error_packet(pckt.type(), ERR_CMD_UNKNOWN, err_msg);
-        serverSocket->send(clientSockfd, error_packet, 0);
     }
-
-    return string();
+    file.close();
+    return passwords;
 }
 
-
-bool is_user_logged_in(string username, vector<struct client> &clients, mutex &clients_mutex) {
-    lock_guard<mutex> lock(clients_mutex);
-    
-    for (auto client : clients) {
-        if (client.username.compare(username) == 0)
-            return true;
-    }
-
-    return false;
+void write_password(const std::string &username, const std::string &hashed_password) {
+    std::ofstream file(PASSWORD_FILE, std::ios::app);
+    file << username << ":" << hashed_password << std::endl;
+    file.close();
 }
 
 
@@ -252,7 +364,7 @@ void listen_for_client(LPTF_Socket *serverSocket, int clientSockfd, sockaddr_in 
                 cout << "Got non-message packet from client: \"" << req.type() << "\"" << endl;
                 
                 string err_msg = "Not Implemented";
-                LPTF_Packet err_pckt = build_error_packet(req.type(), ERR_CMD_UNKNOWN, err_msg);
+                LPTF_Packet err_pckt = build_error_packet(req.type(), ERR_CODE_UNKNOWN, err_msg);
                 serverSocket->send(clientSockfd, err_pckt, 0);
                 break;
             }
@@ -266,6 +378,12 @@ void listen_for_client(LPTF_Socket *serverSocket, int clientSockfd, sockaddr_in 
 
 
 int main() {
+
+    // if (sodium_init() < 0) {
+    //     cout << "Could not init sodium library !" << endl;
+    //     return 1;
+    // }
+
     int port = 12345;
     int max_clients = 10;
 

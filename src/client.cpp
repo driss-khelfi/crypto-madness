@@ -23,8 +23,38 @@ bool login(LPTF_Socket *clientSocket, string username) {
     pckt = clientSocket->read();
 
     if (pckt.type() == REPLY_PACKET && get_refered_packet_type_from_reply_packet(pckt) == LOGIN_PACKET) {
-        cout << "Login successful." << endl;
-        return true;
+        string password = getpass(get_reply_content_from_reply_packet(pckt).c_str());
+        // cout << get_reply_content_from_reply_packet(pckt);
+        // string password;
+        // getline(cin, password);
+        LPTF_Packet password_packet = LPTF_Packet(MESSAGE_PACKET, (void *)password.c_str(), password.size());
+        clientSocket->write(password_packet);
+        
+        LPTF_Packet auth_reply = clientSocket->read();
+        if (auth_reply.type() == REPLY_PACKET && get_refered_packet_type_from_reply_packet(auth_reply) == LOGIN_PACKET) {
+            cout << "Login successful." << endl;
+            return true;
+        } else if (auth_reply.type() == ERROR_PACKET) {
+            cout << "Unable to log in: " << get_error_content_from_error_packet(auth_reply) << endl;
+        }
+    } else if (pckt.type() == MESSAGE_PACKET) {
+        string new_password = getpass(get_message_from_message_packet(pckt).c_str());
+        // string new_password;
+        // getline(cin, new_password);
+        LPTF_Packet new_password_packet = LPTF_Packet(MESSAGE_PACKET, (void *)new_password.c_str(), new_password.size());
+        clientSocket->write(new_password_packet);
+
+        string new_password_confirm = getpass("Confirm Password: ");
+        LPTF_Packet new_password_confirm_packet = LPTF_Packet(MESSAGE_PACKET, (void *)new_password_confirm.c_str(), new_password_confirm.size());
+        clientSocket->write(new_password_confirm_packet);
+        
+        LPTF_Packet create_reply = clientSocket->read();
+        if (create_reply.type() == REPLY_PACKET && get_refered_packet_type_from_reply_packet(create_reply) == LOGIN_PACKET) {
+            cout << "User created and logged in successfully." << endl;
+            return true;
+        } else if (create_reply.type() == ERROR_PACKET) {
+            cout << "Unable to create user: " << get_error_content_from_error_packet(create_reply) << endl;
+        }
     } else if (pckt.type() == ERROR_PACKET) {
         cout << "Unable to log in: " << get_error_content_from_error_packet(pckt) << endl;
     } else {

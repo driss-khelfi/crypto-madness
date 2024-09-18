@@ -25,8 +25,8 @@
 
 
 // command error codes
-#define ERR_CMD_FAILURE 0
-#define ERR_CMD_UNKNOWN 1
+#define ERR_CODE_FAILURE 0
+#define ERR_CODE_UNKNOWN 1
 
 
 typedef struct {
