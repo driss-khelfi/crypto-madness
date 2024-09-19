@@ -43,7 +43,7 @@ bool is_password_valid(string &password) {
 
 // based on Proton's description
 float calculate_password_entropy(string &password) {
-    return 0.0;
+    return 0.0 + password.size();
 }
 
 
@@ -162,9 +162,7 @@ string wait_for_login(LPTF_Socket *serverSocket, int clientSockfd, vector<struct
                 LPTF_Packet password_packet = serverSocket->recv(clientSockfd, 0);
                 string password ((const char *)password_packet.get_content(), password_packet.get_header().length);
 
-                string hash = md5(password);
-
-                if (hash == passwords[client_username]) {
+                if (compare_sha256_with_salt96(password, passwords[client_username])) {
                     
                     if (is_user_logged_in(client_username, clients, clients_mutex)) {
                         string err_msg = "User already logged in !";
@@ -207,7 +205,7 @@ string wait_for_login(LPTF_Socket *serverSocket, int clientSockfd, vector<struct
                         return string();
                     }
 
-                    write_password(client_username, md5(password));
+                    write_password(client_username, sha256_with_salt96(password));
                     LPTF_Packet success_packet = build_reply_packet(LOGIN_PACKET, (void*)"OK", 2);
                     serverSocket->send(clientSockfd, success_packet, 0);
                     return client_username;
