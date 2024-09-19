@@ -64,7 +64,6 @@ bool login(LPTF_Socket *clientSocket, string username) {
     return false;
 }
 
-
 int main(int argc, char const *argv[]) {
     string username;
     string ip;
