@@ -30,16 +30,37 @@ struct client {
 
 
 // FIXME implement
-bool is_password_valid(string &password) {
-    if (password.size() > 0) {
+bool is_password_valid(const string &password) {
+    if (password.size() < 8) return false;  //8 characters long
 
-        
-        return true;
+    bool has_upper = false, has_special = false;
+    for (char c : password) {
+        if (isspace(c)) return false;  // no spaces
+        if (isupper(c)) has_upper = true;  // majuscule
+        if (ispunct(c)) has_special = true;  // special character
     }
-    
-    return false;
+
+    return has_upper && has_special;
 }
 
+float calculate_password_entropy(const string &password) {
+    if (password.empty()) return 0.0;
+
+    map<char, int> char_count;
+    for (char c : password) {
+        char_count[c]++;
+    }
+
+    float entropy = 0.0;
+    float log2 = log(2.0);
+    for (auto &p : char_count) {
+        float freq = static_cast<float>(p.second) / password.length();
+        entropy -= freq * (log(freq) / log2);
+    }
+    
+    entropy *= password.length();
+    return entropy;
+}
 
 // based on Proton's description
 float calculate_password_entropy(string &password) {
