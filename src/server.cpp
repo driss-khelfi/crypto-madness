@@ -10,6 +10,8 @@
 #include <fstream>
 #include <map>
 
+#include <math.h>
+
 #include "../include/LPTF_Net/LPTF_Socket.hpp"
 #include "../include/LPTF_Net/LPTF_Utils.hpp"
 
@@ -29,18 +31,18 @@ struct client {
 };
 
 
-// FIXME implement
 bool is_password_valid(const string &password) {
     if (password.size() < 8) return false;  //8 characters long
 
-    bool has_upper = false, has_special = false;
+    bool has_upper = false, has_special = false, has_digit = false;
     for (char c : password) {
         if (isspace(c)) return false;  // no spaces
-        if (isupper(c)) has_upper = true;  // majuscule
+        if (isupper(c)) has_upper = true;  // upper letter
+        if (isdigit(c)) has_digit = true;  // digit
         if (ispunct(c)) has_special = true;  // special character
     }
 
-    return has_upper && has_special;
+    return has_upper && has_special && has_digit;
 }
 
 float calculate_password_entropy(const string &password) {
@@ -60,11 +62,6 @@ float calculate_password_entropy(const string &password) {
     
     entropy *= password.length();
     return entropy;
-}
-
-// based on Proton's description
-float calculate_password_entropy(string &password) {
-    return 0.0 + password.size();
 }
 
 
@@ -225,6 +222,8 @@ string wait_for_login(LPTF_Socket *serverSocket, int clientSockfd, vector<struct
                         serverSocket->send(clientSockfd, error_packet, 0);
                         return string();
                     }
+
+                    cout << "Entropy: " << calculate_password_entropy(password) << endl;
 
                     write_password(client_username, sha256_with_salt96(password));
                     LPTF_Packet success_packet = build_reply_packet(LOGIN_PACKET, (void*)"OK", 2);
