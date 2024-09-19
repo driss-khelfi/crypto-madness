@@ -13,7 +13,7 @@
 #include "../include/LPTF_Net/LPTF_Socket.hpp"
 #include "../include/LPTF_Net/LPTF_Utils.hpp"
 
-// #include <sodium.h>
+#include <sodium.h>
 
 #include "../include/crypto.hpp"
 
@@ -377,10 +377,10 @@ void listen_for_client(LPTF_Socket *serverSocket, int clientSockfd, sockaddr_in 
 
 int main() {
 
-    // if (sodium_init() < 0) {
-    //     cout << "Could not init sodium library !" << endl;
-    //     return 1;
-    // }
+    if (sodium_init() < 0) {
+        cout << "Could not init sodium library !" << endl;
+        return 1;
+    }
 
     int port = 12345;
     int max_clients = 10;
