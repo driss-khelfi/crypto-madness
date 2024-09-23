@@ -10,39 +10,47 @@
 #include <fstream>
 #include <map>
 
-#include <math.h>
-
 #include "../include/LPTF_Net/LPTF_Socket.hpp"
 #include "../include/LPTF_Net/LPTF_Utils.hpp"
 
-#include <sodium.h>
+// #include <sodium.h>
 
 #include "../include/crypto.hpp"
+
+#include "crypto.hpp"
 
 using namespace std;
 
 
 #define PASSWORD_FILE "actually_safe_this_time.txt"
 
+int main() {
+    generate_random_bits("path/to/your/.bin");
+
+    std::string key;
+    std::ifstream key_file("path/to/your/.bin", std::ios::binary);
+    key.assign((std::istreambuf_iterator<char>(key_file)), std::istreambuf_iterator<char>());
+    key_file.close();
+}
 
 struct client {
     int sockfd;
-    string username;
+    std::string username;
+    size_t key_index = 0;
 };
 
-
+// FIXME implement
 bool is_password_valid(const string &password) {
     if (password.size() < 8) return false;  //8 characters long
 
-    bool has_upper = false, has_special = false, has_digit = false;
+    bool has_upper = false, has_special = false;
     for (char c : password) {
         if (isspace(c)) return false;  // no spaces
-        if (isupper(c)) has_upper = true;  // upper letter
-        if (isdigit(c)) has_digit = true;  // digit
+        if (isupper(c)) has_upper = true;  // majuscule
         if (ispunct(c)) has_special = true;  // special character
     }
 
-    return has_upper && has_special && has_digit;
+    return has_upper && has_special;
 }
 
 float calculate_password_entropy(const string &password) {
@@ -62,6 +70,11 @@ float calculate_password_entropy(const string &password) {
     
     entropy *= password.length();
     return entropy;
+}
+
+// based on Proton's description
+float calculate_password_entropy(string &password) {
+    return 0.0;
 }
 
 
@@ -180,7 +193,9 @@ string wait_for_login(LPTF_Socket *serverSocket, int clientSockfd, vector<struct
                 LPTF_Packet password_packet = serverSocket->recv(clientSockfd, 0);
                 string password ((const char *)password_packet.get_content(), password_packet.get_header().length);
 
-                if (compare_sha256_with_salt96(password, passwords[client_username])) {
+                string hash = md5(password);
+
+                if (hash == passwords[client_username]) {
                     
                     if (is_user_logged_in(client_username, clients, clients_mutex)) {
                         string err_msg = "User already logged in !";
@@ -223,9 +238,7 @@ string wait_for_login(LPTF_Socket *serverSocket, int clientSockfd, vector<struct
                         return string();
                     }
 
-                    cout << "Entropy: " << calculate_password_entropy(password) << endl;
-
-                    write_password(client_username, sha256_with_salt96(password));
+                    write_password(client_username, md5(password));
                     LPTF_Packet success_packet = build_reply_packet(LOGIN_PACKET, (void*)"OK", 2);
                     serverSocket->send(clientSockfd, success_packet, 0);
                     return client_username;
@@ -397,10 +410,10 @@ void listen_for_client(LPTF_Socket *serverSocket, int clientSockfd, sockaddr_in 
 
 int main() {
 
-    if (sodium_init() < 0) {
-        cout << "Could not init sodium library !" << endl;
-        return 1;
-    }
+    // if (sodium_init() < 0) {
+    //     cout << "Could not init sodium library !" << endl;
+    //     return 1;
+    // }
 
     int port = 12345;
     int max_clients = 10;

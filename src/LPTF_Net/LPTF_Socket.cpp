@@ -57,34 +57,14 @@ void LPTF_Socket::connect(const struct sockaddr *addr, socklen_t addrlen) {
     }
 }
 
-ssize_t LPTF_Socket::send(int sockfdto, LPTF_Packet &packet, int flags) {
-    void *data = packet.data();
+void LPTF_Socket::send_encrypted(int sockfdto, const std::string& message, const std::string& key, size_t& key_index) {
+    std::string encrypted_msg = xor_encrypt(message, key, key_index);
+    send(sockfdto, encrypted_msg.c_str(), encrypted_msg.size(), 0);
 
-    if (data) {
-        ssize_t retval = ::send(sockfdto, data, packet.size(), flags);
-        free(data);
-        return retval;
-    }
-
-    return -1;
-}
-
-LPTF_Packet LPTF_Socket::recv(int sockfdfrom, int flags) {
-    uint8_t buffer[sizeof(PACKET_HEADER)+UINT16_MAX];
-    ssize_t retval = ::recv(sockfdfrom, buffer, sizeof(PACKET_HEADER)+UINT16_MAX, flags);
-
-    if (retval < 0 /*aka -1*/ || ((size_t) retval) /*-Wsign-compare*/ < sizeof(PACKET_HEADER)) {
-        char msg[64];
-        sprintf(msg, "Received too few bytes (expected %ld, got %ld).", sizeof(PACKET_HEADER), retval);
-        throw runtime_error(msg);
-    }
-
-    LPTF_Packet packet(buffer, sizeof(PACKET_HEADER)+UINT16_MAX);
-
-    // cout << "Packet Received:" << endl;
-    // packet.print_specs();
-
-    return packet;
+std::string LPTF_Socket::recv_encrypted(int sockfdfrom, const std::string& key, size_t& key_index) {
+    char buffer[1024];
+    int len = recv(sockfdfrom, buffer, sizeof(buffer), 0);
+    return xor_encrypt(std::string(buffer, len), key, key_index);
 }
 
 LPTF_Packet LPTF_Socket::read() {

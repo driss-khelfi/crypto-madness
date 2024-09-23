@@ -42,3 +42,5 @@ string get_path_from_remove_directory_request_packet(LPTF_Packet &packet);
 RENAME_DIR_REQ_PACKET_STRUCT get_data_from_rename_directory_request_packet(LPTF_Packet &packet);
 
 BINARY_PART_PACKET_STRUCT get_data_from_binary_part_packet(LPTF_Packet &packet);
+
+std::string xor_encrypt(const std::string& data, const std::string& key, size_t& key_index);

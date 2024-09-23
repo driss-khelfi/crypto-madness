@@ -6,8 +6,18 @@
 #include "../include/LPTF_Net/LPTF_Socket.hpp"
 #include "../include/LPTF_Net/LPTF_Utils.hpp"
 
+#include "crypto.hpp"
+
 using namespace std;
 
+int main() {
+    generate_random_bits("path/to/your/.bin");
+
+    std::string key;
+    std::ifstream key_file("path/to/your/.bin", std::ios::binary);
+    key.assign((std::istreambuf_iterator<char>(key_file)), std::istreambuf_iterator<char>());
+    key_file.close();
+}
 
 void print_help() {
     cout << "Usage:" << endl;
@@ -63,7 +73,6 @@ bool login(LPTF_Socket *clientSocket, string username) {
 
     return false;
 }
-
 int main(int argc, char const *argv[]) {
     string username;
     string ip;
