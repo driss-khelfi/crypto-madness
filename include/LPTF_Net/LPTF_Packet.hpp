@@ -21,6 +21,8 @@
 #define BINARY_PART_PACKET 10
 #define LOGIN_PACKET 11
 
+#define OTP_GEN_BYTES_PACKET 0xFE
+
 #define ERROR_PACKET 0xFF   // a packet type should not be higher than this value
 
 
@@ -69,4 +71,6 @@ class LPTF_Packet {
         virtual void *data();
 
         void print_specs();
+
+        void set_reserved_byte(uint8_t b);
 };

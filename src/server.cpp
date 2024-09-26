@@ -10,47 +10,95 @@
 #include <fstream>
 #include <map>
 
+#include <math.h>
+
 #include "../include/LPTF_Net/LPTF_Socket.hpp"
 #include "../include/LPTF_Net/LPTF_Utils.hpp"
 
-// #include <sodium.h>
+#include <sodium.h>
 
 #include "../include/crypto.hpp"
-
-#include "crypto.hpp"
+#include "../include/OTPMgr.hpp"
 
 using namespace std;
 
 
 #define PASSWORD_FILE "actually_safe_this_time.txt"
 
-int main() {
-    generate_random_bits("path/to/your/.bin");
 
-    std::string key;
-    std::ifstream key_file("path/to/your/.bin", std::ios::binary);
-    key.assign((std::istreambuf_iterator<char>(key_file)), std::istreambuf_iterator<char>());
-    key_file.close();
+
+void regen_pad_and_send_seed(LPTF_Socket *socket, int sockfdto, OTPMgr *otp_mgr) {
+    uint32_t seed = random_seed();
+    otp_mgr->regenerate_pad(seed);
+
+    cout << "New Seed: " << seed << endl;
+
+    seed = htonl(seed);
+
+    LPTF_Packet pckt = LPTF_Packet(OTP_GEN_BYTES_PACKET, &seed, sizeof(seed));
+
+    socket->send(sockfdto, pckt, 0);
 }
+
+
+ssize_t send_encrypted(LPTF_Socket *socket, int sockfdto, LPTF_Packet &packet, int flags, OTPMgr *otp_mgr) {
+
+    if (!otp_mgr->XOR_packet_content(packet) /* not enough bytes */) {
+
+        regen_pad_and_send_seed(socket, sockfdto, otp_mgr);
+        
+        // XOR packet content
+        if (!otp_mgr->XOR_packet_content(packet))
+            throw runtime_error("Unable to encrypt packet after OTP regen ! (Send)");
+
+    }
+
+    packet.set_reserved_byte(1);    // flag to tell that the packet is encrypted
+    return socket->send(sockfdto, packet, flags);
+
+}
+
+LPTF_Packet recv_encrypted(LPTF_Socket *socket, int sockfdfrom, int flags, OTPMgr *otp_mgr) {
+    LPTF_Packet pckt = socket->recv(sockfdfrom, flags);
+
+    if (pckt.get_header().reserved != 1) {
+        if (pckt.type() != OTP_GEN_BYTES_PACKET) {
+            throw runtime_error("Received non-encrypted packet !");
+        } else {
+
+            regen_pad_and_send_seed(socket, sockfdfrom, otp_mgr);
+
+            pckt = socket->recv(sockfdfrom, flags);
+
+        }
+    } else if (!otp_mgr->XOR_packet_content(pckt) /* not enough bytes */) {
+        throw runtime_error("Unable to decrypt packet: OTP out of sync ! (Recv)");
+    }
+
+    return pckt;
+
+}
+
+
 
 struct client {
     int sockfd;
-    std::string username;
-    size_t key_index = 0;
+    string username;
+    OTPMgr *otp_mgr;
 };
 
-// FIXME implement
 bool is_password_valid(const string &password) {
     if (password.size() < 8) return false;  //8 characters long
 
-    bool has_upper = false, has_special = false;
+    bool has_space = false, has_upper = false, has_special = false, has_digit = false;
     for (char c : password) {
-        if (isspace(c)) return false;  // no spaces
-        if (isupper(c)) has_upper = true;  // majuscule
+        if (isspace(c)) has_space = true;  // no spaces
+        if (isupper(c)) has_upper = true;  // upper letter
+        if (isdigit(c)) has_digit = true;  // digit
         if (ispunct(c)) has_special = true;  // special character
     }
 
-    return has_upper && has_special;
+    return !has_space && has_upper && has_special && has_digit;
 }
 
 float calculate_password_entropy(const string &password) {
@@ -72,16 +120,11 @@ float calculate_password_entropy(const string &password) {
     return entropy;
 }
 
-// based on Proton's description
-float calculate_password_entropy(string &password) {
-    return 0.0;
-}
-
 
 void close_client_connection(int clientSockfd, vector<struct client> &clients, mutex &clients_mutex);
 string wait_for_login(LPTF_Socket *serverSocket, int clientSockfd, vector<struct client> &clients, mutex &clients_mutex);
 bool is_user_logged_in(string username, vector<struct client> &clients, mutex &clients_mutex);
-void send_message(LPTF_Socket *serverSocket, int clientSockfd, string userfrom, string message, time_t t);
+void send_message(LPTF_Socket *serverSocket, int clientSockfd, OTPMgr *otp_mgr, string userfrom, string message, time_t t);
 void broadcast_message(LPTF_Socket *serverSocket, int clientSockfd, string userfrom, string message, time_t t, vector<struct client> &clients, mutex &clients_mutex);
 void listen_for_client(LPTF_Socket *serverSocket, int clientSockfd, sockaddr_in clientAddr, socklen_t clientAddrLen, vector<struct client> &clients, mutex &clients_mutex);
 void set_client_username(int clientSockfd, string username, vector<struct client> &clients, mutex &clients_mutex);
@@ -193,9 +236,7 @@ string wait_for_login(LPTF_Socket *serverSocket, int clientSockfd, vector<struct
                 LPTF_Packet password_packet = serverSocket->recv(clientSockfd, 0);
                 string password ((const char *)password_packet.get_content(), password_packet.get_header().length);
 
-                string hash = md5(password);
-
-                if (hash == passwords[client_username]) {
+                if (compare_sha256_with_salt96(password, passwords[client_username])) {
                     
                     if (is_user_logged_in(client_username, clients, clients_mutex)) {
                         string err_msg = "User already logged in !";
@@ -238,7 +279,9 @@ string wait_for_login(LPTF_Socket *serverSocket, int clientSockfd, vector<struct
                         return string();
                     }
 
-                    write_password(client_username, md5(password));
+                    cout << "Entropy: " << calculate_password_entropy(password) << endl;
+
+                    write_password(client_username, sha256_with_salt96(password));
                     LPTF_Packet success_packet = build_reply_packet(LOGIN_PACKET, (void*)"OK", 2);
                     serverSocket->send(clientSockfd, success_packet, 0);
                     return client_username;
@@ -278,6 +321,7 @@ void close_client_connection(int clientSockfd, vector<struct client> &clients, m
         lock_guard<mutex> lock(clients_mutex);
         for (auto it = clients.begin(); it != clients.end(); next(it)) {
             if ((*it).sockfd == clientSockfd) {
+                delete (*it).otp_mgr;
                 clients.erase(it);
                 break;
             }
@@ -292,6 +336,16 @@ void set_client_username(int clientSockfd, string username, vector<struct client
     for (auto &client : clients) {
         if (client.sockfd == clientSockfd) {
             client.username = username;
+            break;
+        }
+    }
+}
+
+void set_client_pad_manager(int clientSockfd, OTPMgr *mgr, vector<struct client> &clients, mutex &clients_mutex) {
+    lock_guard<mutex> lock(clients_mutex);
+    for (auto &client : clients) {
+        if (client.sockfd == clientSockfd) {
+            client.otp_mgr = mgr;
             break;
         }
     }
@@ -322,9 +376,7 @@ void write_password(const std::string &username, const std::string &hashed_passw
 }
 
 
-void send_message(LPTF_Socket *serverSocket, int clientSockfd, string userfrom, string message, time_t t) {
-    // FIXME change MESSAGE packet structure to include: time, userfrom, message
-
+void send_message(LPTF_Socket *serverSocket, int clientSockfd, OTPMgr *otp_mgr, string userfrom, string message, time_t t) {
     char timestamp[22];
     strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]", localtime(&t));
 
@@ -332,7 +384,7 @@ void send_message(LPTF_Socket *serverSocket, int clientSockfd, string userfrom, 
     content += " " + userfrom + ": " + message;
 
     LPTF_Packet msg = build_message_packet(content);
-    serverSocket->send(clientSockfd, msg, 0);
+    send_encrypted(serverSocket, clientSockfd, msg, 0, otp_mgr);
 }
 
 
@@ -343,7 +395,7 @@ void broadcast_message(LPTF_Socket *serverSocket, int clientSockfd, string userf
         if (client.sockfd != clientSockfd && client.username.size() != 0) {
             
             try {
-                send_message(serverSocket, client.sockfd, userfrom, message, t);
+                send_message(serverSocket, client.sockfd, client.otp_mgr, userfrom, message, t);
                 cout << "Messsage sent to client " << client.username << endl;
             } catch (const runtime_error &ex) {
                 cout << "Unable to send message to client " << client.username << ": " << ex.what();
@@ -357,7 +409,7 @@ void broadcast_message(LPTF_Socket *serverSocket, int clientSockfd, string userf
 void listen_for_client(LPTF_Socket *serverSocket, int clientSockfd, sockaddr_in clientAddr, socklen_t clientAddrLen, vector<struct client> &clients, mutex &clients_mutex) {
     {
         lock_guard<mutex> lock(clients_mutex);
-        clients.push_back({clientSockfd, string()});
+        clients.push_back({clientSockfd, string(), nullptr});
     }
 
     cout << "Handling client: " << inet_ntoa(clientAddr.sin_addr) << ":" << ntohs(clientAddr.sin_port) << " (len:" << clientAddrLen << ")" << endl;
@@ -381,10 +433,32 @@ void listen_for_client(LPTF_Socket *serverSocket, int clientSockfd, sockaddr_in 
 
     cout << "Client logged in as \"" << username << "\"" << endl;
 
+    string pad_file = username + "_OTP_s.bin";
+    OTPMgr *mgr;
+
+    try {
+        uint32_t seed = random_seed();
+        OTPMgr::generate_pad(seed, pad_file);
+
+        cout << "Seed " << username << ": " << seed << endl;
+
+        seed = htonl(seed);
+
+        LPTF_Packet seed_pckt (OTP_GEN_BYTES_PACKET, &seed, sizeof(seed));
+        serverSocket->send(clientSockfd, seed_pckt, 0);
+
+        mgr = new OTPMgr(pad_file);
+        set_client_pad_manager(clientSockfd, mgr, clients, clients_mutex);
+    } catch (const runtime_error &ex) {
+        cout << "Exception when creating OTP Manager for client " << username << ": " << ex.what() << endl;
+        close_client_connection(clientSockfd, clients, clients_mutex);
+        return;
+    }
+
     try {
         // listen for packets
         while (true) {
-            LPTF_Packet req = serverSocket->recv(clientSockfd, 0);
+            LPTF_Packet req = recv_encrypted(serverSocket, clientSockfd, 0, mgr);
 
             if (req.type() == MESSAGE_PACKET) {
                 time_t t = time(0);
@@ -410,10 +484,10 @@ void listen_for_client(LPTF_Socket *serverSocket, int clientSockfd, sockaddr_in 
 
 int main() {
 
-    // if (sodium_init() < 0) {
-    //     cout << "Could not init sodium library !" << endl;
-    //     return 1;
-    // }
+    if (sodium_init() < 0) {
+        cout << "Could not init sodium library !" << endl;
+        return 1;
+    }
 
     int port = 12345;
     int max_clients = 10;

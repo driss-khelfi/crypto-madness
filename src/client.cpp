@@ -2,26 +2,80 @@
 #include <stdexcept>
 #include <cstring>
 #include <unistd.h>
+#include <sys/mman.h>
+#include <stdlib.h>
+
+#include <fstream>
+
+#include <signal.h>
+#include <thread>
 
 #include "../include/LPTF_Net/LPTF_Socket.hpp"
 #include "../include/LPTF_Net/LPTF_Utils.hpp"
 
-#include "crypto.hpp"
+#include "../include/crypto.hpp"
+#include "../include/OTPMgr.hpp"
 
 using namespace std;
 
-int main() {
-    generate_random_bits("path/to/your/.bin");
-
-    std::string key;
-    std::ifstream key_file("path/to/your/.bin", std::ios::binary);
-    key.assign((std::istreambuf_iterator<char>(key_file)), std::istreambuf_iterator<char>());
-    key_file.close();
-}
 
 void print_help() {
     cout << "Usage:" << endl;
     cout << "\tclient <username>@<ip>:<port>" << endl;
+}
+
+
+// handles OTP regens
+ssize_t write_encrypted(LPTF_Socket &socket, LPTF_Packet &packet, OTPMgr &mgr, LPTF_Packet *otp_gen_packet_ptr) {
+
+    if (!mgr.XOR_packet_content(packet)) {
+
+        LPTF_Packet otp_pckt (OTP_GEN_BYTES_PACKET, nullptr, 0);
+        socket.write(otp_pckt);
+
+        // wait for seed
+        while ((*otp_gen_packet_ptr).type() != OTP_GEN_BYTES_PACKET) {
+            cout << "Sleep..." << endl;
+            usleep(50000);
+        }
+        
+        uint32_t seed;
+        memcpy(&seed, otp_gen_packet_ptr->get_content(), sizeof(seed));
+        
+        seed = ntohl(seed);
+
+        cout << "New seed: " << seed << endl;
+
+        mgr.regenerate_pad(seed);
+
+        // reset OTP packet when used
+        *otp_gen_packet_ptr = LPTF_Packet();
+
+        // retry XOR packet content
+        if (!mgr.XOR_packet_content(packet))
+            throw runtime_error("Unable to encrypt packet after OTP regen !");
+
+    }
+
+    packet.set_reserved_byte(1);    // flag to tell that the packet is encrypted
+    return socket.write(packet);
+}
+
+
+// handles OTP regens
+LPTF_Packet read_encrypted(LPTF_Socket &socket, OTPMgr &mgr) {
+    LPTF_Packet pckt = socket.read();
+
+    if (pckt.get_header().reserved != 1) {
+        if (pckt.type() == OTP_GEN_BYTES_PACKET) {
+            return pckt;
+        }
+    } else {
+        if (!mgr.XOR_packet_content(pckt))
+            throw runtime_error("Unable to decrypt packet: OTP out of sync !");
+    }
+
+    return pckt;
 }
 
 
@@ -73,6 +127,8 @@ bool login(LPTF_Socket *clientSocket, string username) {
 
     return false;
 }
+
+
 int main(int argc, char const *argv[]) {
     string username;
     string ip;
@@ -139,36 +195,66 @@ int main(int argc, char const *argv[]) {
             return 1;
         }
 
-        if (!fork()) {
-            // handle write
-            while (true) {
-                string message;
+        string pad_file = username+"_OTP_c.bin";
+        OTPMgr otp_mgr;
 
-                cout << "Send Message: ";
-                getline(cin, message);
+        // sync client/server pad
+        {
+            LPTF_Packet pckt = clientSocket.read();
 
-                // send message
-                LPTF_Packet msg = build_message_packet(message);
-                clientSocket.write(msg);
+            if (pckt.type() == OTP_GEN_BYTES_PACKET) {
+                uint32_t seed;
+                memcpy(&seed, pckt.get_content(), sizeof(seed));
+
+                seed = ntohl(seed);
+
+                cout << "Using seed: " << seed << endl;
+
+                OTPMgr::generate_pad(seed, pad_file);
+
+                otp_mgr.set_otp_file(pad_file);
+            } else {
+                cerr << "Got unexpected packet type from server ! (Expected OTP packet)" << endl;
+                clientSocket.close();
+                return 1;
             }
-        } else {
-            // handle read
+        }
+
+        // OTP Gen packet requests are put here
+        LPTF_Packet *otp_gen_packet = new LPTF_Packet;
+
+        thread read_thread ([&clientSocket, &otp_mgr, otp_gen_packet] {
             while (true) {
-                LPTF_Packet msg = clientSocket.read();
+                LPTF_Packet msg = read_encrypted(clientSocket, otp_mgr);
 
                 if (msg.type() == MESSAGE_PACKET) {
                     cout << get_message_from_message_packet(msg) << endl;
-                } else if (msg.type() != REPLY_PACKET) {
-                    cout << "Unexpected packet type !" << endl;
-                } else {
+                } else if (msg.type() == REPLY_PACKET) {
                     cout << "### REPLY ###" << endl;
+                } else if (msg.type() == OTP_GEN_BYTES_PACKET) {
+                    
+                    *otp_gen_packet = msg;
+                    cout << "Otp packet updated" << endl;
+
+                } else {
+                    cout << "Unexpected packet type !" << endl;
                 }
             }
+        });
+
+        while (true) {
+            string message;
+
+            cout << "Send Message: ";
+            getline(cin, message);
+
+            LPTF_Packet msg = build_message_packet(message);
+            write_encrypted(clientSocket, msg, otp_mgr, otp_gen_packet);
         }
 
     } catch (const exception &ex) {
         cerr << "Exception: " << ex.what() << endl;
-        return 1;
+        exit(1);
     }
 
     return 0;

@@ -14,7 +14,7 @@
 
 
 class LPTF_Socket {
-private:
+protected:
     int sockfd;
 
 public:
@@ -28,23 +28,23 @@ public:
 
     LPTF_Socket &operator=(const LPTF_Socket &src);
 
-    void init(int domain, int type, int protocol);
+    virtual void init(int domain, int type, int protocol);
 
-    void connect(const struct sockaddr *addr, socklen_t addrlen);
+    virtual void connect(const struct sockaddr *addr, socklen_t addrlen);
 
-    ssize_t send(int sockfdto, LPTF_Packet &packet, int flags);
+    virtual ssize_t send(int sockfdto, LPTF_Packet &packet, int flags);
 
-    LPTF_Packet recv(int sockfdfrom, int flags);
+    virtual LPTF_Packet recv(int sockfdfrom, int flags);
 
-    LPTF_Packet read();
+    virtual LPTF_Packet read();
 
-    ssize_t write(LPTF_Packet &packet);
+    virtual ssize_t write(LPTF_Packet &packet);
 
-    int accept(sockaddr *__restrict__ addr, socklen_t *__restrict__ addr_len);
+    virtual int accept(sockaddr *__restrict__ addr, socklen_t *__restrict__ addr_len);
 
-    int bind(const sockaddr *addr, socklen_t len);
+    virtual int bind(const sockaddr *addr, socklen_t len);
 
-    int listen(int backlog);
+    virtual int listen(int backlog);
 
-    int close();
+    virtual int close();
 };

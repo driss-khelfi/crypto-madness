@@ -186,3 +186,6 @@ void LPTF_Packet::print_specs() {
 
     std::cout << std::endl;
 }
+
+
+void LPTF_Packet::set_reserved_byte(uint8_t b) { header.reserved = b; }
