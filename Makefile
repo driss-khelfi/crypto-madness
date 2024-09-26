@@ -27,3 +27,9 @@ test: tclean
 
 tclean:
 	rm -f test
+
+genpad: genpad_clean
+	g++ -o genpad generate_pad.cpp src/crypto.cpp $(COMMON_LIBRARIES) $(COMPILER_FLAGS)
+
+genpad_clean:
+	rm -f genpad
