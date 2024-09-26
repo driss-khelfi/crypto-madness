@@ -27,6 +27,17 @@ using namespace std;
 
 
 
+void close_client_connection(int clientSockfd, vector<struct client> &clients, mutex &clients_mutex);
+string wait_for_login(LPTF_Socket *serverSocket, int clientSockfd, vector<struct client> &clients, mutex &clients_mutex);
+bool is_user_logged_in(string username, vector<struct client> &clients, mutex &clients_mutex);
+void send_message(LPTF_Socket *serverSocket, int clientSockfd, OTPMgr *otp_mgr, string userfrom, string message, time_t t, vector<struct client> &clients, mutex &clients_mutex);
+void broadcast_message(LPTF_Socket *serverSocket, int clientSockfd, string userfrom, string message, time_t t, vector<struct client> &clients, mutex &clients_mutex);
+void listen_for_client(LPTF_Socket *serverSocket, int clientSockfd, sockaddr_in clientAddr, socklen_t clientAddrLen, vector<struct client> &clients, mutex &clients_mutex);
+void set_client_username(int clientSockfd, string username, vector<struct client> &clients, mutex &clients_mutex);
+std::map<std::string, std::string> read_passwords();
+void write_password(const std::string &username, const std::string &hashed_password);
+
+
 void regen_pad_and_send_seed(LPTF_Socket *socket, int sockfdto, OTPMgr *otp_mgr) {
     uint32_t seed = random_seed();
     otp_mgr->regenerate_pad(seed);
@@ -41,15 +52,21 @@ void regen_pad_and_send_seed(LPTF_Socket *socket, int sockfdto, OTPMgr *otp_mgr)
 }
 
 
-ssize_t send_encrypted(LPTF_Socket *socket, int sockfdto, LPTF_Packet &packet, int flags, OTPMgr *otp_mgr) {
+ssize_t send_encrypted(LPTF_Socket *socket, int sockfdto, LPTF_Packet &packet, int flags, OTPMgr *otp_mgr, vector<struct client> &clients, mutex &clients_mutex) {
 
     if (!otp_mgr->XOR_packet_content(packet) /* not enough bytes */) {
-
-        regen_pad_and_send_seed(socket, sockfdto, otp_mgr);
         
-        // XOR packet content
-        if (!otp_mgr->XOR_packet_content(packet))
-            throw runtime_error("Unable to encrypt packet after OTP regen ! (Send)");
+        string msg = "No more byte masks !";
+        LPTF_Packet p = build_error_packet(packet.type(), 0, msg);
+        ssize_t ret = socket->send(sockfdto, p, 0);
+        close_client_connection(sockfdto, clients, clients_mutex);
+        return ret;
+
+        // regen_pad_and_send_seed(socket, sockfdto, otp_mgr);
+        
+        // // XOR packet content
+        // if (!otp_mgr->XOR_packet_content(packet))
+        //     throw runtime_error("Unable to encrypt packet after OTP regen ! (Send)");
 
     }
 
@@ -119,17 +136,6 @@ float calculate_password_entropy(const string &password) {
     entropy *= password.length();
     return entropy;
 }
-
-
-void close_client_connection(int clientSockfd, vector<struct client> &clients, mutex &clients_mutex);
-string wait_for_login(LPTF_Socket *serverSocket, int clientSockfd, vector<struct client> &clients, mutex &clients_mutex);
-bool is_user_logged_in(string username, vector<struct client> &clients, mutex &clients_mutex);
-void send_message(LPTF_Socket *serverSocket, int clientSockfd, OTPMgr *otp_mgr, string userfrom, string message, time_t t);
-void broadcast_message(LPTF_Socket *serverSocket, int clientSockfd, string userfrom, string message, time_t t, vector<struct client> &clients, mutex &clients_mutex);
-void listen_for_client(LPTF_Socket *serverSocket, int clientSockfd, sockaddr_in clientAddr, socklen_t clientAddrLen, vector<struct client> &clients, mutex &clients_mutex);
-void set_client_username(int clientSockfd, string username, vector<struct client> &clients, mutex &clients_mutex);
-std::map<std::string, std::string> read_passwords();
-void write_password(const std::string &username, const std::string &hashed_password);
 
 
 // borrowed from https://www.geeksforgeeks.org/thread-pool-in-cpp/
@@ -376,7 +382,7 @@ void write_password(const std::string &username, const std::string &hashed_passw
 }
 
 
-void send_message(LPTF_Socket *serverSocket, int clientSockfd, OTPMgr *otp_mgr, string userfrom, string message, time_t t) {
+void send_message(LPTF_Socket *serverSocket, int clientSockfd, OTPMgr *otp_mgr, string userfrom, string message, time_t t, vector<struct client> &clients, mutex &clients_mutex) {
     char timestamp[22];
     strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]", localtime(&t));
 
@@ -384,7 +390,7 @@ void send_message(LPTF_Socket *serverSocket, int clientSockfd, OTPMgr *otp_mgr, 
     content += " " + userfrom + ": " + message;
 
     LPTF_Packet msg = build_message_packet(content);
-    send_encrypted(serverSocket, clientSockfd, msg, 0, otp_mgr);
+    send_encrypted(serverSocket, clientSockfd, msg, 0, otp_mgr, clients, clients_mutex);
 }
 
 
@@ -395,7 +401,7 @@ void broadcast_message(LPTF_Socket *serverSocket, int clientSockfd, string userf
         if (client.sockfd != clientSockfd && client.username.size() != 0) {
             
             try {
-                send_message(serverSocket, client.sockfd, client.otp_mgr, userfrom, message, t);
+                send_message(serverSocket, client.sockfd, client.otp_mgr, userfrom, message, t, clients, clients_mutex);
                 cout << "Messsage sent to client " << client.username << endl;
             } catch (const runtime_error &ex) {
                 cout << "Unable to send message to client " << client.username << ": " << ex.what();
@@ -433,27 +439,31 @@ void listen_for_client(LPTF_Socket *serverSocket, int clientSockfd, sockaddr_in 
 
     cout << "Client logged in as \"" << username << "\"" << endl;
 
-    string pad_file = username + "_OTP_s.bin";
-    OTPMgr *mgr;
+    string pad_file = "OTP.bin";
+    OTPMgr *mgr = new OTPMgr(pad_file);
+    set_client_pad_manager(clientSockfd, mgr, clients, clients_mutex);
 
-    try {
-        uint32_t seed = random_seed();
-        OTPMgr::generate_pad(seed, pad_file);
+    // string pad_file = username + "_OTP_s.bin";
+    // OTPMgr *mgr;
 
-        cout << "Seed " << username << ": " << seed << endl;
+    // try {
+    //     uint32_t seed = random_seed();
+    //     OTPMgr::generate_pad(seed, pad_file);
 
-        seed = htonl(seed);
+    //     cout << "Seed " << username << ": " << seed << endl;
 
-        LPTF_Packet seed_pckt (OTP_GEN_BYTES_PACKET, &seed, sizeof(seed));
-        serverSocket->send(clientSockfd, seed_pckt, 0);
+    //     seed = htonl(seed);
 
-        mgr = new OTPMgr(pad_file);
-        set_client_pad_manager(clientSockfd, mgr, clients, clients_mutex);
-    } catch (const runtime_error &ex) {
-        cout << "Exception when creating OTP Manager for client " << username << ": " << ex.what() << endl;
-        close_client_connection(clientSockfd, clients, clients_mutex);
-        return;
-    }
+    //     LPTF_Packet seed_pckt (OTP_GEN_BYTES_PACKET, &seed, sizeof(seed));
+    //     serverSocket->send(clientSockfd, seed_pckt, 0);
+
+    //     mgr = new OTPMgr(pad_file);
+    //     set_client_pad_manager(clientSockfd, mgr, clients, clients_mutex);
+    // } catch (const runtime_error &ex) {
+    //     cout << "Exception when creating OTP Manager for client " << username << ": " << ex.what() << endl;
+    //     close_client_connection(clientSockfd, clients, clients_mutex);
+    //     return;
+    // }
 
     try {
         // listen for packets
