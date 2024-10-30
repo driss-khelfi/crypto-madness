@@ -18,78 +18,47 @@
 #include <sodium.h>
 
 #include "../include/crypto.hpp"
-#include "../include/OTPMgr.hpp"
 
 using namespace std;
 
 
 #define PASSWORD_FILE "actually_safe_this_time.txt"
+#define KEYS_FILE "user_keys_do_not_steal_plz.txt"
 
 
 
 void close_client_connection(int clientSockfd, vector<struct client> &clients, mutex &clients_mutex);
-string wait_for_login(LPTF_Socket *serverSocket, int clientSockfd, vector<struct client> &clients, mutex &clients_mutex);
+std::pair<std::string, std::vector<unsigned char>> wait_for_login(LPTF_Socket *serverSocket, int clientSockfd, vector<struct client> &clients, mutex &clients_mutex);
 bool is_user_logged_in(string username, vector<struct client> &clients, mutex &clients_mutex);
-void send_message(LPTF_Socket *serverSocket, int clientSockfd, OTPMgr *otp_mgr, string userfrom, string message, time_t t, vector<struct client> &clients, mutex &clients_mutex);
+void send_message(LPTF_Socket *serverSocket, int clientSockfd, std::vector<unsigned char> *key, string userfrom, string message, time_t t);
 void broadcast_message(LPTF_Socket *serverSocket, int clientSockfd, string userfrom, string message, time_t t, vector<struct client> &clients, mutex &clients_mutex);
 void listen_for_client(LPTF_Socket *serverSocket, int clientSockfd, sockaddr_in clientAddr, socklen_t clientAddrLen, vector<struct client> &clients, mutex &clients_mutex);
 void set_client_username(int clientSockfd, string username, vector<struct client> &clients, mutex &clients_mutex);
 std::map<std::string, std::string> read_passwords();
 void write_password(const std::string &username, const std::string &hashed_password);
+std::map<std::string, std::vector<unsigned char>> read_keys();
+void write_key(const std::string &username, const std::vector<unsigned char> &key, const std::vector<unsigned char> &salt);
 
 
-void regen_pad_and_send_seed(LPTF_Socket *socket, int sockfdto, OTPMgr *otp_mgr) {
-    uint32_t seed = random_seed();
-    otp_mgr->regenerate_pad(seed);
+ssize_t send_encrypted(LPTF_Socket *socket, int sockfdto, LPTF_Packet &packet, int flags, std::vector<unsigned char> *key) {
 
-    cout << "New Seed: " << seed << endl;
+    string encrypted_content = encrypt_symmetric(string((char *)packet.get_content(), packet.get_header().length), *key);
 
-    seed = htonl(seed);
+    LPTF_Packet encr_pckt = LPTF_Packet(packet.type(), (void *) encrypted_content.c_str(), encrypted_content.size());
 
-    LPTF_Packet pckt = LPTF_Packet(OTP_GEN_BYTES_PACKET, &seed, sizeof(seed));
-
-    socket->send(sockfdto, pckt, 0);
-}
-
-
-ssize_t send_encrypted(LPTF_Socket *socket, int sockfdto, LPTF_Packet &packet, int flags, OTPMgr *otp_mgr, vector<struct client> &clients, mutex &clients_mutex) {
-
-    if (!otp_mgr->XOR_packet_content(packet) /* not enough bytes */) {
-        
-        string msg = "No more byte masks !";
-        LPTF_Packet p = build_error_packet(packet.type(), 0, msg);
-        ssize_t ret = socket->send(sockfdto, p, 0);
-        close_client_connection(sockfdto, clients, clients_mutex);
-        return ret;
-
-        // regen_pad_and_send_seed(socket, sockfdto, otp_mgr);
-        
-        // // XOR packet content
-        // if (!otp_mgr->XOR_packet_content(packet))
-        //     throw runtime_error("Unable to encrypt packet after OTP regen ! (Send)");
-
-    }
-
-    packet.set_reserved_byte(1);    // flag to tell that the packet is encrypted
-    return socket->send(sockfdto, packet, flags);
+    encr_pckt.set_reserved_byte(1);    // flag to tell that the packet is encrypted
+    return socket->send(sockfdto, encr_pckt, flags);
 
 }
 
-LPTF_Packet recv_encrypted(LPTF_Socket *socket, int sockfdfrom, int flags, OTPMgr *otp_mgr) {
+LPTF_Packet recv_encrypted(LPTF_Socket *socket, int sockfdfrom, int flags, std::vector<unsigned char> *key) {
     LPTF_Packet pckt = socket->recv(sockfdfrom, flags);
 
-    if (pckt.get_header().reserved != 1) {
-        if (pckt.type() != OTP_GEN_BYTES_PACKET) {
-            throw runtime_error("Received non-encrypted packet !");
-        } else {
-
-            regen_pad_and_send_seed(socket, sockfdfrom, otp_mgr);
-
-            pckt = socket->recv(sockfdfrom, flags);
-
-        }
-    } else if (!otp_mgr->XOR_packet_content(pckt) /* not enough bytes */) {
-        throw runtime_error("Unable to decrypt packet: OTP out of sync ! (Recv)");
+    if (pckt.get_header().reserved == 1) {
+        string content = decrypt_symmetric(string((char *)pckt.get_content(), pckt.get_header().length), *key);
+        pckt = LPTF_Packet(pckt.type(), (void *) content.c_str(), content.size());
+    } else {
+        throw runtime_error("Packet is not encrypted !");
     }
 
     return pckt;
@@ -97,12 +66,12 @@ LPTF_Packet recv_encrypted(LPTF_Socket *socket, int sockfdfrom, int flags, OTPMg
 }
 
 
-
 struct client {
     int sockfd;
     string username;
-    OTPMgr *otp_mgr;
+    std::vector<unsigned char> *key;
 };
+
 
 bool is_password_valid(const string &password) {
     if (password.size() < 8) return false;  //8 characters long
@@ -219,8 +188,9 @@ private:
 };
 
 
-string wait_for_login(LPTF_Socket *serverSocket, int clientSockfd, vector<struct client> &clients, mutex &clients_mutex) {
+std::pair<std::string, std::vector<unsigned char>> wait_for_login(LPTF_Socket *serverSocket, int clientSockfd, vector<struct client> &clients, mutex &clients_mutex) {
     std::map<std::string, std::string> passwords = read_passwords();
+    std::map<std::string, std::vector<unsigned char>> keys = read_keys();
 
     LPTF_Packet pckt = serverSocket->recv(clientSockfd, 0);
 
@@ -231,34 +201,59 @@ string wait_for_login(LPTF_Socket *serverSocket, int clientSockfd, vector<struct
             string err_msg = "Username invalid !";
             LPTF_Packet error_packet = build_error_packet(LOGIN_PACKET, ERR_CODE_FAILURE, err_msg);
             serverSocket->send(clientSockfd, error_packet, 0);
-            return string();
+            return {string(), vector<unsigned char>()};
         } else {
             if (passwords.find(client_username) != passwords.end()) {
-                // User exists, ask for password
-                string reply_msg = "Enter Password: ";
-                LPTF_Packet ask_password_packet = build_reply_packet(LOGIN_PACKET, (void*)reply_msg.c_str(), reply_msg.size());
-                serverSocket->send(clientSockfd, ask_password_packet, 0);
+                // User exist -> key verif.
 
-                LPTF_Packet password_packet = serverSocket->recv(clientSockfd, 0);
-                string password ((const char *)password_packet.get_content(), password_packet.get_header().length);
+                // get key from file
+                if (keys.find(client_username) == keys.end()) {
+                    // should not happen
+                    cout << "Key not found for registered user " << client_username << endl;
+                    return {string(), vector<unsigned char>()};
+                }
 
-                if (compare_sha256_with_salt96(password, passwords[client_username])) {
-                    
-                    if (is_user_logged_in(client_username, clients, clients_mutex)) {
-                        string err_msg = "User already logged in !";
-                        LPTF_Packet error_packet = build_error_packet(LOGIN_PACKET, ERR_CODE_FAILURE, err_msg);
-                        serverSocket->send(clientSockfd, error_packet, 0);
-                        return string();
-                    }
+                std::vector<unsigned char> key = keys[client_username];
+                
+                // generate random bytes to verify user key
+                unsigned char verif_bytes[16];
+                randombytes(verif_bytes, 16);
 
-                    LPTF_Packet success_packet = build_reply_packet(LOGIN_PACKET, (void*)"OK", 2);
-                    serverSocket->send(clientSockfd, success_packet, 0);
-                    return client_username;
-                } else {
-                    string err_msg = "Wrong Password.";
+                string verif_str = bytes_to_hex_string(verif_bytes, 16);
+                string encr_verif_str = encrypt_symmetric(verif_str, key);
+
+                LPTF_Packet verif_packet = build_reply_packet(LOGIN_PACKET, (void *) encr_verif_str.c_str(), encr_verif_str.size());
+
+                serverSocket->send(clientSockfd, verif_packet, 0);
+
+                LPTF_Packet resp = serverSocket->recv(clientSockfd, 0);
+
+                // user doesn't have the key or error
+                if (resp.type() != MESSAGE_PACKET) {
+                    cout << "Invalid packet !" << endl;
+                    return {string(), vector<unsigned char>()};
+                }
+
+                // fail
+                if (strcmp(verif_str.c_str(), get_message_from_message_packet(resp).c_str()) != 0) {
+                    string err_msg = "Invalid key !";
                     LPTF_Packet error_packet = build_error_packet(LOGIN_PACKET, ERR_CODE_UNKNOWN, err_msg);
                     serverSocket->send(clientSockfd, error_packet, 0);
+                    return {string(), vector<unsigned char>()};
                 }
+
+                // check if user is logged in
+                if (is_user_logged_in(client_username, clients, clients_mutex)) {
+                    string err_msg = "User already logged in !";
+                    LPTF_Packet error_packet = build_error_packet(LOGIN_PACKET, ERR_CODE_FAILURE, err_msg);
+                    serverSocket->send(clientSockfd, error_packet, 0);
+                    return {string(), vector<unsigned char>()};
+                }
+
+                LPTF_Packet success_packet = build_reply_packet(LOGIN_PACKET, (void*)"OK", 2);
+                serverSocket->send(clientSockfd, success_packet, 0);
+                return {client_username, key};
+
             } else {
                 // User doesn't exist, ask for new password
                 LPTF_Packet ask_password_packet = build_message_packet("Create a new Password: ");
@@ -275,22 +270,32 @@ string wait_for_login(LPTF_Socket *serverSocket, int clientSockfd, vector<struct
                         string err_msg = "Password format invalid !";
                         LPTF_Packet error_packet = build_error_packet(LOGIN_PACKET, ERR_CODE_FAILURE, err_msg);
                         serverSocket->send(clientSockfd, error_packet, 0);
-                        return string();
+                        return {string(), vector<unsigned char>()};
                     }
                     
                     if (is_user_logged_in(client_username, clients, clients_mutex)) {
                         string err_msg = "User already logged in !";
                         LPTF_Packet error_packet = build_error_packet(LOGIN_PACKET, ERR_CODE_FAILURE, err_msg);
                         serverSocket->send(clientSockfd, error_packet, 0);
-                        return string();
+                        return {string(), vector<unsigned char>()};
                     }
 
                     cout << "Entropy: " << calculate_password_entropy(password) << endl;
 
+                    // generate keys and send key to client
+
+                    auto key_n_salt = generate_symmetric_key(password);
+
                     write_password(client_username, sha256_with_salt96(password));
-                    LPTF_Packet success_packet = build_reply_packet(LOGIN_PACKET, (void*)"OK", 2);
+                    write_key(client_username, key_n_salt.first, key_n_salt.second);
+
+                    unsigned char key[KEY_LENGTH];
+                    for (int i = 0; i < KEY_LENGTH; i++)
+                        key[i] = key_n_salt.first.at(i);
+
+                    LPTF_Packet success_packet = build_reply_packet(LOGIN_PACKET, (void*) key, KEY_LENGTH);
                     serverSocket->send(clientSockfd, success_packet, 0);
-                    return client_username;
+                    return {client_username, key_n_salt.first};
                 } else {
                     string err_msg = "Password and Confirmation are different !";
                     LPTF_Packet error_packet = build_error_packet(LOGIN_PACKET, ERR_CODE_UNKNOWN, err_msg);
@@ -304,7 +309,7 @@ string wait_for_login(LPTF_Socket *serverSocket, int clientSockfd, vector<struct
         serverSocket->send(clientSockfd, error_packet, 0);
     }
 
-    return string();
+    return {string(), vector<unsigned char>()};
 }
 
 
@@ -327,7 +332,7 @@ void close_client_connection(int clientSockfd, vector<struct client> &clients, m
         lock_guard<mutex> lock(clients_mutex);
         for (auto it = clients.begin(); it != clients.end(); next(it)) {
             if ((*it).sockfd == clientSockfd) {
-                delete (*it).otp_mgr;
+                // delete it->key;  // not needed as key is from a local var ref and is eventually deleted
                 clients.erase(it);
                 break;
             }
@@ -347,11 +352,11 @@ void set_client_username(int clientSockfd, string username, vector<struct client
     }
 }
 
-void set_client_pad_manager(int clientSockfd, OTPMgr *mgr, vector<struct client> &clients, mutex &clients_mutex) {
+void set_client_key(int clientSockfd, std::vector<unsigned char> *key, vector<struct client> &clients, mutex &clients_mutex) {
     lock_guard<mutex> lock(clients_mutex);
     for (auto &client : clients) {
         if (client.sockfd == clientSockfd) {
-            client.otp_mgr = mgr;
+            client.key = key;
             break;
         }
     }
@@ -375,6 +380,29 @@ std::map<std::string, std::string> read_passwords() {
     return passwords;
 }
 
+
+std::map<std::string, std::vector<unsigned char>> read_keys() {
+    std::ifstream file(KEYS_FILE);
+    std::map<std::string, std::vector<unsigned char>> keys;
+    std::string line;
+    
+    while (std::getline(file, line)) {
+        size_t sep = line.find(':');
+        if (sep != std::string::npos) {
+            std::string username = line.substr(0, sep);
+            // do not take salt
+            std::string key_str = line.substr(sep + 1).substr(SALT_LENGTH*2);
+
+            std::vector<unsigned char> key = hex_string_to_bytes(key_str);
+
+            keys[username] = key;
+        }
+    }
+    file.close();
+    return keys;
+}
+
+
 void write_password(const std::string &username, const std::string &hashed_password) {
     std::ofstream file(PASSWORD_FILE, std::ios::app);
     file << username << ":" << hashed_password << std::endl;
@@ -382,7 +410,14 @@ void write_password(const std::string &username, const std::string &hashed_passw
 }
 
 
-void send_message(LPTF_Socket *serverSocket, int clientSockfd, OTPMgr *otp_mgr, string userfrom, string message, time_t t, vector<struct client> &clients, mutex &clients_mutex) {
+void write_key(const std::string &username, const std::vector<unsigned char> &key, const std::vector<unsigned char> &salt) {
+    std::ofstream file(KEYS_FILE, std::ios::app);
+    file << username << ":" << bytes_to_hex_string(salt) << bytes_to_hex_string(key) << std::endl;
+    file.close();
+}
+
+
+void send_message(LPTF_Socket *serverSocket, int clientSockfd, std::vector<unsigned char> *key, string userfrom, string message, time_t t) {
     char timestamp[22];
     strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]", localtime(&t));
 
@@ -390,7 +425,7 @@ void send_message(LPTF_Socket *serverSocket, int clientSockfd, OTPMgr *otp_mgr, 
     content += " " + userfrom + ": " + message;
 
     LPTF_Packet msg = build_message_packet(content);
-    send_encrypted(serverSocket, clientSockfd, msg, 0, otp_mgr, clients, clients_mutex);
+    send_encrypted(serverSocket, clientSockfd, msg, 0, key);
 }
 
 
@@ -401,7 +436,7 @@ void broadcast_message(LPTF_Socket *serverSocket, int clientSockfd, string userf
         if (client.sockfd != clientSockfd && client.username.size() != 0) {
             
             try {
-                send_message(serverSocket, client.sockfd, client.otp_mgr, userfrom, message, t, clients, clients_mutex);
+                send_message(serverSocket, client.sockfd, client.key, userfrom, message, t);
                 cout << "Messsage sent to client " << client.username << endl;
             } catch (const runtime_error &ex) {
                 cout << "Unable to send message to client " << client.username << ": " << ex.what();
@@ -420,15 +455,17 @@ void listen_for_client(LPTF_Socket *serverSocket, int clientSockfd, sockaddr_in 
 
     cout << "Handling client: " << inet_ntoa(clientAddr.sin_addr) << ":" << ntohs(clientAddr.sin_port) << " (len:" << clientAddrLen << ")" << endl;
 
-    string username;
+    std::pair<std::string, std::vector<unsigned char>> ret_login;
 
     try {
-        username = wait_for_login(serverSocket, clientSockfd, clients, clients_mutex);
+        ret_login = wait_for_login(serverSocket, clientSockfd, clients, clients_mutex);
     } catch (const runtime_error &ex) {
         cout << "Login error: " << ex.what();
         close_client_connection(clientSockfd, clients, clients_mutex);
         return;
     }
+
+    string username = ret_login.first;
 
     if (username.size() == 0) {
         close_client_connection(clientSockfd, clients, clients_mutex);
@@ -439,36 +476,15 @@ void listen_for_client(LPTF_Socket *serverSocket, int clientSockfd, sockaddr_in 
 
     cout << "Client logged in as \"" << username << "\"" << endl;
 
-    string pad_file = "OTP.bin";
-    OTPMgr *mgr = new OTPMgr(pad_file);
-    set_client_pad_manager(clientSockfd, mgr, clients, clients_mutex);
+    // private key
+    std::vector<unsigned char> *key = &ret_login.second;
 
-    // string pad_file = username + "_OTP_s.bin";
-    // OTPMgr *mgr;
-
-    // try {
-    //     uint32_t seed = random_seed();
-    //     OTPMgr::generate_pad(seed, pad_file);
-
-    //     cout << "Seed " << username << ": " << seed << endl;
-
-    //     seed = htonl(seed);
-
-    //     LPTF_Packet seed_pckt (OTP_GEN_BYTES_PACKET, &seed, sizeof(seed));
-    //     serverSocket->send(clientSockfd, seed_pckt, 0);
-
-    //     mgr = new OTPMgr(pad_file);
-    //     set_client_pad_manager(clientSockfd, mgr, clients, clients_mutex);
-    // } catch (const runtime_error &ex) {
-    //     cout << "Exception when creating OTP Manager for client " << username << ": " << ex.what() << endl;
-    //     close_client_connection(clientSockfd, clients, clients_mutex);
-    //     return;
-    // }
+    set_client_key(clientSockfd, key, clients, clients_mutex);
 
     try {
         // listen for packets
         while (true) {
-            LPTF_Packet req = recv_encrypted(serverSocket, clientSockfd, 0, mgr);
+            LPTF_Packet req = recv_encrypted(serverSocket, clientSockfd, 0, key);
 
             if (req.type() == MESSAGE_PACKET) {
                 time_t t = time(0);

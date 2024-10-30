@@ -4,3 +4,4 @@ server
 actually_safe_this_time.txt
 test
 OTP.bin
+*.key

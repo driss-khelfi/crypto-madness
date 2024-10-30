@@ -27,46 +27,30 @@ std::string to_hex_string(const unsigned char* hash, size_t n) {
 
 int main()
 {
-    auto seed = random_seed();
-    string server_otp_file = "test_server_otp.bin";
-    string client_otp_file = "test_client_otp.bin";
+    char password[] = "Correct Horse Battery Staple";
 
-    OTPMgr::generate_pad(seed, server_otp_file);
-    OTPMgr::generate_pad(seed, client_otp_file);
+    unsigned char salt[crypto_pwhash_SALTBYTES];
+    unsigned char key[crypto_box_SEEDBYTES];
 
-    OTPMgr server_mgr (server_otp_file);
-    OTPMgr client_mgr (client_otp_file);
-    
-    string message;
+    randombytes_buf(salt, sizeof salt);
 
-    while (true) {
-
-        cout << "Message: ";
-        getline(cin, message);
-
-        LPTF_Packet packet = build_message_packet(message);
-        cout << "Plain Message Packet:" << endl;
-        packet.print_specs();
-
-        if (!client_mgr.XOR_packet_content(packet)) {
-            cerr << "Client XOR content failed !"<< endl;
-        } else {
-
-            cout << "XOR Message Packet:" << endl;
-            packet.print_specs();
-
-            if (!server_mgr.XOR_packet_content(packet)) {
-                cerr << "Server XOR content failed !"<< endl;
-            } else {
-                cout << "Server decrypt:" << endl;
-                packet.print_specs();
-
-                cout << "Client message: " << get_message_from_message_packet(packet) << endl;
-            }
-
-        }
-
+    if (crypto_pwhash (key, sizeof key, password, strlen(password), salt,
+                       crypto_pwhash_OPSLIMIT_MODERATE, crypto_pwhash_MEMLIMIT_MODERATE,
+                       crypto_pwhash_ALG_DEFAULT) != 0) {
+        cerr << "out of memory" << endl;
+        return 1;
     }
+
+    string message = "Hello from server!";
+
+    cout << "Message: " << message << endl;
+
+
+
+    cout << "Encrypted Message: " << endl;
+
+
+    cout << "Decrypted Message: " << endl;
 
     return 0;
 }
